@@ -1,0 +1,1393 @@
+---
+title: "Uncertainty Quantification for Agent Based Models: A Tutorial"
+output: html_document
+bibliography: SGPReferences.bib
+header-includes:
+  - \usepackage{amsmath}
+  - \usepackage{bbm}
+---
+
+Check all
+tt
+refs - all issues
+
+This is an interactive tutorial on how to perform various uncertainty quantification methods for a simple sheep and wolf predator-prey agent based model. All code and data are either included in this document or in the additional files (<tt> DataSW.csv </tt>, <tt> DataSW_Test.csv </tt>). All necessary R packages are listed below. For any questions or queries, please contact <tt> l.m.kimpton\@exeter.ac.uk </tt>.
+
+```{r packages, echo=TRUE, message=FALSE, error=FALSE}
+library(lhs)
+library(tidyverse)
+library(ggplot2)
+library(kernlab)
+library(latex2exp)
+library(DiceKriging)
+library(RobustGaSP)
+library(gridExtra)
+library(hetGP)
+library(rdist)
+library(mvtnorm)
+library(invgamma)
+```
+
+
+## Introduction
+
+Agent-based models (ABMs) are powerful computational tools designed to simulate the actions and interactions of autonomous agents within a defined environment. These agents, which represent individuals such as people, animals, or organizations, operate according to a set of rules. The agents can adapt to changes in their environment or the behaviour of other agents, which allows researchers to study the emergent behaviour of complex systems as well as observe both individuals and interactions.  ABMs are particularly valuable in fields such as epidemiology, economics, ecology, and social sciences, where individual heterogeneity and local interactions play a crucial role in shaping system dynamics.
+
+However, the complexity and stochastic nature of ABMs introduces significant challenges in terms of uncertainty quantification (UQ) [@Craig2001; @Currin1991; @Haylock1996].  Uncertainty in ABMs can arise from various sources, including the randomness inherent in agent behaviours, variability in model parameters, and the initial conditions of the system.  High-dimensional and non-linear interactions among agents can amplify these uncertainties, making it difficult to predict the overall system behaviour with confidence.  Additionally,  increased agents results in increased computation time of the model, making it difficult to run at many initial input settings. With the increased use of high powered computing comes the ability to build larger ABMs with more complex rule sets and higher numbers of agents [@Ozik2021].  Although large scale computers can help reduce run time through parallelisation, large ABMs can still be very computationally expensive: UQ techniques, including emulation, then become vital in prediction whilst also addressing uncertainty.
+
+Addressing these uncertainties is crucial for enhancing the reliability and predictive power of ABMs. Effective UQ techniques allow researchers to assess the confidence in their model predictions, identify the most influential parameters,  guide the design of robust decision-making strategies, and calibrate models. By systematically quantifying and managing uncertainties, researchers can improve model validation, ensure the robustness of simulation outcomes, and provide more reliable guidance for policy and decision-making [@Lempert2019].
+
+In this tutorial, we explore various methodologies for uncertainty quantification in agent-based models, emphasising their importance in validating model outputs and improving model robustness.  These methods include stochastic emulation, classification, sequential design, and calibration in the form of history matching. As a tutorial example we will be showcasing UQ techniques using the simple wolf and sheep predator-prey ecosystem model. 
+
+## Wolf and Sheep Predator Prey ABM
+
+We apply UQ methodology to the simple sheep and wolf predator-prey ecosystem model in NetLogo.  In the model, the sheep wander randomly and the wolves look for sheep to eat.  We assume grass is infinite in the model and hence eating or moving does not change the sheep's energy levels.  Each step costs the wolves energy where they must eat sheep to replace energy, otherwise they die out.  The system is unstable if it results in extinction for either the sheep or wolves. 
+
+To keep the example simple and easy to visualise, we restrict the model to have two input variables: sheep reproduction rate $x_{1} \in [0,20]$ and wolf reproduction rate $x_{2} \in [0,20]$. We fix all other parameters at default values (initial number of sheep: 100, initial number of wolves: 50, sheep gain from food: 5, wolves gain from food: 20). The ABM records the number of both sheep and wolves at each time step.  There are methods to jointly model outputs in a trajectory [@Fadikar2023], as well as methods to model the time series as a high dimensional output,  performing dimensionality reduction techniques such as principal component analysis before emulation [@Higdon2012].  This is outside the scope of this tutorial, and we instead define the output $y$ of the model to be the time to wolf extinction. 
+
+
+## Emulation
+
+When dealing with computationally expensive computer models, emulators [@Currin1991; @Sacks1989; @Santner2003] are typically used as statistical surrogates that approximate the relationship between the inputs and outputs of the complex model.  An emulator is a computationally fast stochastic approximation to, in this case, the ABM.  The expectation of the emulator produces a prediction, and the variance gives a measure of the extra uncertainty coming from the emulation.  Emulators often only require a relatively small set of model runs, known as the training data, and by learning from these runs, the emulator can predict the outputs for new, unseen inputs with minimal computational effort. This approach significantly reduces the computational burden associated with running detailed simulations, allowing for more extensive and efficient exploration of the model.
+
+Assume the computer model, or ABM, is represented by the mathematical function $f : \mathcal{X} \mapsto \mathbb{R}$ with $\textbf{X} := (\textbf{x}_{1}, \ldots, \textbf{x}_{n})^{T} \in \mathcal{X}$ being a set of $n$ inputs to the model in $p$ dimensions. The function $f(\cdot)$ hence maps the inputs $\textbf{X}$ to their associated outputs $\textbf{y} = (f(\textbf{x}_{1}), \ldots, f(\textbf{x}_{n}))^{T}$.  A common choice of emulator is a Gaussian process (GP) [@Rasmussen2006; @Santner2003].  In a GP, any finite collection of function values follows a multivariate Normal distribution. A GP, $Z$ is typically considered as a sum of two processes:
+$$
+Z = m(\textbf{x}) + \varepsilon(\textbf{x}), 
+$$
+where $m(\textbf{x})$ represents a deterministic global response surface behaviour, and $\varepsilon(\textbf{x})$ is a correlated residual process capturing local input dependent deviation from the global response surface.  We can hence model $f$ as a Gaussian process $Z$ with training data $\{\textbf{X}, \textbf{y}\}$ such that:
+$$
+Z(\textbf{x}) \sim GP(m(\textbf{x}), k(\textbf{x}, \textbf{x}') + \tau^{2}).
+$$
+The GP is specified by a mean function $m(\cdot)$, which represents the expected value of the function at any point, and a covariance function (or kernel) $k(\cdot, \cdot)$, which describes the correlation between function values at different points. The choice of kernel encodes assumptions about the smoothness and variability of $f$.  Here, $\tau^{2}$ is known as the nugget parameter, either used for numerical stability or for allowing stochastic variation in the outputs.  Using standard multivariate Normal distribution results, we can predict the function $f$ at a new location $\textbf{x}$ with posterior mean $m^{*}(\cdot)$ and variance $k^{*}(\cdot)$ given as: 
+$$
+\begin{split}
+m^{*}(\textbf{x}) &= m(\textbf{x}) + k(\textbf{x},\textbf{X}) (k(\textbf{X}, \textbf{X}) + \tau^{2}I_{n})^{-1} (\textbf{y} - m(\textbf{x})), \\
+k^{*}(\textbf{x}) &= k(\textbf{x}, \textbf{x}) + \tau^{2} - k(\textbf{x},\textbf{X}) (k(\textbf{X}, \textbf{X}) + \tau^{2}I_{n})^{-1} k(\textbf{X},\textbf{x}).
+\end{split}
+$$
+where $k(\textbf{x}, \textbf{X})$ is an $n$-vector whose $i^{\text{th}}$ component is $k(\textbf{x}, \textbf{x}_{i})$ for $i=1, \ldots, n$ and $I_{n}$ is the $n \times n$ identity matrix. 
+
+Agent based models are typically stochastic models since they provide different outputs when run at the exact same input parameters. This makes the standard noiseless Gaussian process emulator used in deterministic problems unsuitable; we can no longer assume that the intrinsic variance is constant across the input space. The nugget term in the equation above represents this intrinsic variance of the simulator and we hence define $\tau^{2}(\textbf{x})$ to be dependent on the input parameters $\textbf{x}$. This is known as heteroskedasticity.
+
+For all stochastic models, running several replicates of the model at the same input values becomes important since we gain valuable information from the replicates about the true variance of the process.  If there are enough replicates at each design point, then we can observe an approximation to both $f$ and $\tau^{2}$ by calculating both the sample means and variances.  We can then model both the mean response and the intrinsic variance with independent Gaussian process, using the sample quantities as training data [@Goldberg1997; @Kersting2007; @Binois2018a]:
+$$
+\begin{split}
+Z(\textbf{x}) &\sim GP(m(\textbf{x}), k(\textbf{x}, \textbf{x}') + \tau^{2}(\textbf{x})) \\
+\text{log}(\tau^{2}(\textbf{x})) &\sim GP(m_{\tau}(\textbf{x}), k_{\tau}(\textbf{x}, \textbf{x}')).
+\end{split}
+$$
+The logarithm of the intrinsic variance is modelled as a Gaussian process instead of the intrinsic variance itself to enforce positivity.  
+
+If there are not enough replicates at each input, then the sample variance does not become a good estimate for the intrinsic variance. A different strategy is to treat the values of the intrinsic variance at the training input points as a set of additional parameters which need to be learnt. @Goldberg1997 does this in a fully Bayesian way, using Markov chain Monte Carlo. Point estimates can instead be used for these variance parameters, which loses the complete quantification of uncertainty, but provides increased computational efficiency. @Binois2018a have produced a more computationally efficient method known as hetGP, which is now a widely known method to fit heteroskedastic Gaussian processes (GPs with non-constant variances). They solve the computational issues by using Woodbury identities to reduce the number of latent variables.  The estimates for $\tau^{2}(\textbf{x})$ are assumed without error and so no uncertainty from the intrinsic estimates is included in predictions. Although this means that the uncertainties are underestimated, the effect is not major. It is also important to note here that replicates are not required to fit a HetGP. The authors give details on how it can be more useful to run the model at inputs which are very close together. In this case, we learn both about the mean response and the intrinsic variance simultaneously.
+
+### Initial Design
+
+It is important that the training set $\{\textbf{X}, \textbf{y}\}$, or initial design of the Gaussian process is space filling across the design space to ensure all of the space is represented.  Latin hypercube designs (LHD) [@OHagan2006] are commonly used to sample a multi-dimensional space efficiently. In LHD, the range of each variable is divided into equal intervals, and samples are taken such that each interval of each variable is sampled exactly once. This ensures that the samples are spread out more evenly across the entire input space, providing a more representative and comprehensive exploration compared to simple random sampling.
+
+We have two inputs to the ABM, $\textbf{X} = (x_{1}, x_{2}) \in [0,1]^{2}$ (note the rescale to $[0,1]$), and choose an initial design using a maximin Latin hypercube with 30 points. The maximin criteria chooses a design that maximises the minimum distance between points. You can either run the following section of code to generate your own latin hypercube (and run these points through the sheep-wolf ABM), or use the given initial design in <tt> DataSW.csv </tt>. This Latin hypercube design is plotted in the following section of code, which has been run through the ABM to obtain the corresponding output vector $\textbf{y}$. Since the model is stochastic, we run the Latin hypercube at 10 replicates. 
+
+```{r LHC1, eval=FALSE}
+# EITHER generate Latin hypercube for initial design
+X <- maximinLHS(30, 2)
+Xx <- round(20*X, 2) # Scale to [0,20]
+
+# Run initial data through ABM to generate training data
+```
+
+```{r ID2}
+# OR load in existing data 
+Data <- read.csv('DataSW.csv')
+
+# Inputs
+X <- Data[,2:3]/20 # Scale to [0,1]
+# Outputs
+YData <- Data[,4:dim(Data)[2]]
+YWolf <- YData[,(seq(2,dim(YData)[2],2))]
+YSheep <- YData[,(seq(1,dim(YData)[2],2))]
+
+# Training data -> 0/1 wolf extinction
+WData <- cbind(X, YWolf)
+XWolf1 <- WData[is.na(WData[,3])==FALSE,(1:2)]
+YWolf1 <- WData[is.na(WData[,3])==FALSE,(3:dim(WData)[2])]
+XWolf0 <- WData[is.na(WData[,3])==TRUE,(1:2)]
+
+# Plot initial design
+colours <- c('Yes'="#009E73", 'No'="#D55E00")
+ggplot() +
+  geom_point(aes(x=XWolf1[,1], y=XWolf1[,2], col='Yes'), size=3) +
+  geom_point(aes(x=XWolf0[,1], y=XWolf0[,2], col='No'), size=3) +
+  scale_color_manual(values=colours) +
+  xlab(TeX('Sheep Reproduction')) + ylab(TeX('Wolf Reproduction')) + labs(colour=TeX('Wolves Extinct'))
+```
+As shown by the coloured dots in the figure above, the ABM does not always produce a model output. At certain locations in the input space (orange points) the wolves fail to reach an extinction point before the model terminates. This typically occurs when there is a large reproduction rate for sheep, but a very low reproduction rate for wolves. We then find that the sheep reproduce exponentially, and the wolves have sufficient energy supply. Since this area of input space has no model output, we must first consider classification methods to fully define where the model is valid.
+
+## Classification
+
+Based on the initial runs of the model in the previous section, we now aim to map the regions where wolves will and will not go extinct.  Classification methods can be used to split the input space into the separate regions according to their associated outputs.  A common method for classification is logistic regression [@Hilbe2009; @Kleinbaum1994],  which models the probability that a given input belongs to a particular class.  For each point in the input space, it outputs a value between 0 and 1, which is then thresholded to classify the point into one of two categories. Similarly,  Gaussian process classification [@Rasmussen2006; @Nickisch2008] models the probability of belonging to a class, but instead uses a GP to model a latent function, which is then squashed through a sigmoid function to produce the probabilistic outputs. Since the exact posterior distribution is not analytically tractable, an approximation must be used to perform inference. This is due to the non-Gaussian nature of the likelihood function (a Bernoulli likelihood for binary classification). Unlike regression, where the likelihood is Gaussian and leads to a Gaussian posterior, classification involves a non-linear transformation, making the posterior distribution non-Gaussian. To manage this, approximation methods such as Laplace approximation, expectation propagation or variational inference [@Rasmussen2006] are used to estimate the posterior distribution. After estimating the posterior distribution, we can then get predictions of region membership for other input points by thresholding the probabilistic outputs at 0.5, or by taking draws from a Bernoulli distribution. Improvements have been made by [@Kimpton2020] who are able to to find a clean boundary between regions.
+
+By taking a GP classification approach, we are able to estimate the classification for any point in the input space. This means that we are able to predict, with uncertainty, whether the wolves are likely to go extinct without running the ABM itself. This is particularly useful if we would like to run the model at further input points so that we are confident that the model will produce an output. If we just have the goal of fitting a GP to model the time to wolf extinction,  then it is unlikely that we would want to waste computational or financial resources running our ABM in the region where wolves do not go extinct, as this will give us no extra information.  Alternatively, if we were more interested in locating the boundary between whether wolves go extinct or not, then we could run more points near the boundary to improve the classification prediction.
+
+The following sections of code give three different methods of performing the classification: logistic regression, tradtional GP classification and the latent GP classification from [@Kimpton2020]. Note that all three methods require the classified training input data objects: <tt> XWolf1 </tt> (wolves reach extinction) and <tt> XWolf0 </tt> (wolves do not reach extinction).
+
+
+### Logistic Regression
+
+Logistic regression is a generalised linear model (GLM) used for binary classification. It models the probability that a given input $\textbf{x} = x_{1}, \ldots, x_{n}$ belongs to one of two possible classes (0/1 or wolves survive/wolves reach extinction). Instead of predicting a continuous value like in linear regression, it predicts the log-odds (logit transformation) of the probability of belonging to class 1. Logistic regression assumes a linear relationship between the input variables $x$ and the log-odds of the probability of an outcome:
+$$
+\text{log} \left( \frac{P(y=1|\textbf{x})}{1 - P(y=1|\textbf{x})} \right) = \beta_{0} + \beta_{1}x_{1} + \ldots + \beta_{n}x_{n}.
+$$
+Here, $P(y=1|\textbf{x})$ is the probability that the output is 1 (or wolves reach extinction) given the input $\textbf{x}$, $\beta_{i}$ are parameters to be estimated and the left-hand side is the logit function, which maps probabilites to the real number line. To ensure the output is constrained to (0,1), we apply the sigmoid function (inverse of logit):
+$$
+P(y=1|\textbf{x}) = \frac{1}{1 + \text{exp}(-(\beta_{0}+\beta_{1}x_{1} + \ldots + \beta_{n}x_{n}))}
+$$
+Once trained, the model outputs $P(y=1|\textbf{x})$ for a given input $\textbf{x}$ which is thresholded at 0.5 to make a prediction (if $P(y=1|\textbf{x}) > 0.5$, predict 1).
+
+The following plots give the probability of wolf extinction across the input space ($P(y=1|\textbf{x})$) and the corresponding classification prediction (threshold at 0.5).
+
+```{r LR1}
+N1 <- dim(XWolf1)[1] # Number of points in each region
+N0 <- dim(XWolf0)[1]
+
+X <- rbind(XWolf0, XWolf1)
+y <- factor(c(rep(0,N0), rep(1,N1)))
+
+SWData <- data.frame(
+  Sheep=X[,1],
+  Wolf=X[,2],
+  tte=y
+)
+
+# Fit the logistic regression model
+logit_model <- glm(tte ~ Sheep + Wolf, data = SWData, family = binomial)
+# Print model summary
+#summary(logit_model)
+
+D2 <- expand.grid(seq(0,1,0.01),seq(0,1,0.01))
+PredInputs <- data.frame(
+  Sheep=D2[,1],
+  Wolf=D2[,2]
+)
+
+# Make predictions on the training data
+predictions <- predict(logit_model, PredInputs, type='response')
+
+# Probability of wolf extinction
+ggplot() +
+  geom_tile(aes(x=PredInputs$Sheep, y=PredInputs$Wolf, fill=predictions), alpha=0.6) +
+  scale_fill_gradientn(colours=c("#D55E00","#009E73")) +
+  geom_point(aes(x=X[,1], y=X[,2]), size=2) +
+  xlab(TeX('Sheep Reproduction')) + ylab(TeX('Wolf Reproduction')) + labs(fill=TeX('P Wolves Extinct'))
+
+P01 <- as.vector(predictions)
+P01[P01 >= 0.5] <- 1
+P01[P01 < 0.5] <- 0
+P01 <- factor(P01, levels = c(0, 1), labels = c("No", "Yes"))
+
+# Predicted wolf extinction
+ggplot() +
+  geom_tile(aes(x=PredInputs$Sheep, y=PredInputs$Wolf, fill=P01), alpha=0.6) +
+  scale_fill_manual(values=c("#D55E00","#009E73")) +
+  geom_point(aes(x=X[,1], y=X[,2]), size=2) +
+  xlab(TeX('Sheep Reproduction')) + ylab(TeX('Wolf Reproduction')) + labs(fill=TeX('Wolves Extinct'))
+```
+
+### GP Classification I
+
+Instead of assuming a linear relationship (like logistic regression), Gaussian process classification places a Gaussian Process prior over the latent function that maps inputs to outputs. The goal is to model the posterior probability of class membership given the training data. GP classification outputs class probabilities using a sigmoid (e.g., logistic) or probit link function. We assume that the outputs are generated via a latent function $f(\textbf{x})$ such that:
+$$
+P(y=1∣f(\textbf{x}))= \sigma(f(\textbf{x}))
+$$
+where $\sigma$ is the sigmois function. Common choices are either the logistic function: $\sigma(f) = \frac{1}{1+e^{-f}}$ or the probit function: $\sigma(f) = \Phi(f)$ where $\Phi$ is the standard normal CDF.
+
+Since the exact posterior distribution is not analytically tractable, an approximation must be used to perform inference. This is due to the non-Gaussian nature of the likelihood function (a Bernoulli likelihood for binary classification). Unlike regression, where the likelihood is Gaussian and leads to a Gaussian posterior, classification involves a non-linear transformation, making the posterior distribution non-Gaussian. To manage this, approximation methods such as Laplace approximation, expectation propagation or variational inference [@Rasmussen2006] are used to estimate the posterior distribution. After estimating the posterior distribution, we can then get predictions of region membership for other input points by thresholding the probabilistic outputs at 0.5, or by taking draws from a Bernoulli distribution. 
+
+
+```{r Class1}
+# GP classification
+
+N1 <- dim(XWolf1)[1] # Number of points in each region
+N0 <- dim(XWolf0)[1]
+
+X <- rbind(XWolf0, XWolf1)
+y <- factor(c(rep(0,N0), rep(1,N1)))
+
+# Train the GPC model
+gpc_model <- gausspr(X, y, kernel = "rbfdot", type = "classification")
+
+D2 <- expand.grid(seq(0,1,0.01),seq(0,1,0.01))
+PredInputs <- data.frame(
+  Sheep=D2[,1],
+  Wolf=D2[,2]
+)
+
+# Make predictions on the training data
+predictions <- predict(gpc_model, D2, type='probabilities')
+
+# Probability of wolf extinction
+ggplot() +
+  geom_tile(aes(x=PredInputs$Sheep, y=PredInputs$Wolf, fill=predictions[,2]), alpha=0.6) +
+  scale_fill_gradientn(colours=c("#D55E00","#009E73")) +
+  geom_point(aes(x=X[,1], y=X[,2]), size=2) +
+  xlab(TeX('Sheep Reproduction')) + ylab(TeX('Wolf Reproduction')) + labs(fill=TeX('P Wolves Extinct'))
+
+P01 <- as.vector(predictions[,2])
+P01[P01 >= 0.5] <- 1
+P01[P01 < 0.5] <- 0
+P01 <- factor(P01, levels = c(0, 1), labels = c("No", "Yes"))
+
+# Predicted clssification of wolf extinction
+ggplot() +
+  geom_tile(aes(x=PredInputs$Sheep, y=PredInputs$Wolf, fill=P01), alpha=0.6) +
+  scale_fill_manual(values=c("#D55E00","#009E73")) +
+  geom_point(aes(x=X[,1], y=X[,2]), size=2) +
+  xlab(TeX('Sheep Reproduction')) + ylab(TeX('Wolf Reproduction')) + labs(fill=TeX('Wolves Extinct'))
+
+# Store classified inputs for future code
+Data_W1 <- D2[(P01 == 'Yes'),]
+Data_W0 <- D2[(P01 == 'No'),]
+
+Data_W1 <- Data_W1 %>% rename(Sheep=Var1, Wolves=Var2)
+Data_W0 <- Data_W0 %>% rename(Sheep=Var1, Wolves=Var2)
+```
+
+
+### GP Classification II
+
+The last code that is provided for GP classification is from [@Kimpton2020]. We do not recommend running this code as it is very slow - it is provided for those who are interested in the method further.
+
+```{r Funcs1, include=FALSE, eval=FALSE, echo=FALSE}
+# metropolis hastings MCMC
+metropnd <- function(iterations=100, eps=0.05, startvalue, D, n1, n2) {
+  m <- dim(D)[2]
+  n <- n1+n2
+  chain <- matrix(0,iterations+1,(2*m+2))
+  info <- matrix(0,iterations+1,3)
+  xS <- startvalue
+  newinfo <- c(0,0,0)
+  
+  beta <- startvalue[1:(m+1)]
+  sigma2 <- startvalue[m+2]
+  ndelta <- startvalue[(m+3):(2*m+2)]
+  
+  # covariance matrix
+  A <- K12(X1=D, X2=D, rho=ndelta, alpha=sigma2)
+  
+  H <- cbind(matrix(1,n,1),D)
+  mm2 <- as.vector(H %*% beta)
+  
+  # likelihood, prior, posterior
+  oldll <- log(pmvnorm(lower=c(rep(-Inf,n1),rep(0,n2)),upper=c(rep(0,n1),rep(Inf,n2)),mean=mm2,sigma=A))[1]
+  prior <-  log(dinvgamma(sigma2,10,10)) + sum(log(dinvgamma((ndelta),10,40)))  + log(dnorm(beta[1],0,5)) + log(dnorm(beta[2],0,5)) + log(dnorm(beta[3],0,5))
+  oldd <- oldll+prior
+  
+  chain[1,] <- startvalue
+  info[1,] <- c(oldd,oldll,prior)
+  
+  prop <- rep(0,(2*m + 2))
+
+  for (i in 1:iterations) {
+    
+    prop[1] <- xS[1] + rnorm(1,0,eps) # Add on small quantity
+    prop[2] <- xS[2] + rnorm(1,0,eps)
+    prop[3] <- xS[3] + rnorm(1,0,eps)
+    prop[4] <- xS[4] + rnorm(1,0,eps)
+    prop[5] <- xS[5] + rnorm(1,0,eps)
+    prop[6] <- xS[6] + rnorm(1,0,eps)
+    
+    # acceptance function
+    a <- MCMC_acceptancend(par=prop, olddist=oldd, dD=D, nN1=n1, nN2=n2)
+    
+    if (a[1]==1) { 
+      count = count + 1
+      xS <- prop
+      newinfo <- a[2:4]
+      oldd <- a[2]  
+    }               
+    chain[(i+1),] <- xS
+    info[(i+1),] <- newinfo
+  }
+  return(list(chain,count,info))
+}
+
+# Acceptance function
+MCMC_acceptancend <- function(par,olddist=oldd, dD, nN1, nN2){
+  
+  mM <- dim(dD)[2]
+  nN <- nN1+nN2
+  if (all(par[(mM+2):(2*mM+2)] > 0) == FALSE) return(c(0,olddist)) # check positivity
+
+  # parameters
+  beta <- par[1:(mM+1)]
+  sigma2 <- par[mM+2]
+  ndelta <- (par[(mM+3):(2*mM+2)])
+
+  hH <- cbind(matrix(1,nN,1),dD)
+  mm <- as.vector(hH %*% beta)
+ 
+  # covariance matrix
+  A <- K12(X1=dD, X2=dD, rho=ndelta, alpha=sigma2)
+  
+  # likelihood, prior, posterior
+  loglik <- log(pmvnorm(lower=c(rep(-Inf,nN1),rep(0,nN2)),upper=c(rep(0,nN1),rep(Inf,nN2)),mean=mm,sigma=A))[1]
+  prior <-  log(dinvgamma(sigma2,10,10)) + sum(log(dinvgamma((ndelta),10,40)))  + log(dnorm(beta[1],0,5)) + log(dnorm(beta[2],0,5)) + log(dnorm(beta[3],0,5))
+  distr <- loglik+prior
+  
+  ratio <- exp(distr-olddist)
+  rstart <- min(c(1,ratio))
+  
+  # comparison with the observed data
+  if(runif(1,0,1) < rstart) return(c(1,distr,loglik,prior)) else return(c(0,distr,loglik,prior))
+  
+}
+
+# covariance function
+K12 <-  function(X1, X2, rho, alpha) { 
+  #Calculates squared exponential covariance matrix for given inputs
+  D = as.matrix(cdist(scale(X1,center=FALSE,scale=rho),scale(X2,center=FALSE,scale=rho)))
+  return((alpha^2) * exp(-(D^2)))
+}
+
+# Sample GP draws from posterior
+Sampfun <- function(Par, Nn, Dd, N1, N2) {
+  
+  beta <- Par[1]
+  sigma2 <- Par[2]
+  delta <- Par[3:4]
+  
+  H <- rep(1, Nn)
+  mm <- rep(beta, Nn)
+  
+  # covariance matrix
+  A <- K12(X1=Dd, X2=Dd, rho=delta, alpha=sigma2)
+  
+  mvtSamples <- rmvnorm(1, mean=mm, sigma=A)
+  if (all(mvtSamples[1:N1] < 0) & all(mvtSamples[(N1+1):(N1+N2)] >= 0)) { 
+    SampC <- mvtSamples 
+  } else {
+    SampC <- NA
+  }
+  return(SampC)
+}
+
+
+# Conditional sampling
+condsamp <- function(parameters,Dnew=Dnew_con,no_iter=100) {
+  
+  beta <- parameters[1:3]
+  sigma2 <- parameters[4]
+  ndelta <- parameters[5:6]
+  
+  Data <- Dnew[,(1:m)]
+  posneg <- Dnew[,(m+1)]
+  n <- dim(Data)[1]
+  
+  H <- cbind(rep(1,n),Data)
+  mx1 <- as.vector(as.matrix(H) %*% beta)
+  
+  A1 <- K12(X1=Data, X2=Data, rho=ndelta, alpha=sigma2) + diag(1e-5,n)
+  
+  y_out2 <- matrix(0,no_iter+1,n)
+  y_out2[1,] <- posneg
+  y_out1 <- posneg
+  for ( k in 1:no_iter ) {
+    for ( j in 1:n ) {
+      if (all(is.na(y_out1) == FALSE)) {
+        sEV <- samp_E_var(num=j,A=A1,mx=mx1,y_out=y_out1)
+        yo <- samp_accp(num=j,Mean=sEV[[1]],Var=sEV[[2]],pn=posneg)
+        y_out1[j] <- yo
+      } else {
+        y_out1[j] <- NA
+      }
+    }
+    y_out2[(k+1),] <- y_out1
+  }
+  return(list(y_out1,y_out2))
+}
+
+samp_E_var <- function(num,A=A1,mx=mx1,y_out=y_out1) {
+  
+  covbit2 <- A[num,-num]
+  varbit <- chol(A[-num,-num])
+  M1 <- backsolve(varbit, covbit2, transpose=TRUE)
+  M2 <- backsolve(varbit, y_out[-num] - mx[-num], transpose=TRUE)
+  
+  Mean <- mx[num] + crossprod(M1,M2)
+  Var <- A[num,num] - crossprod(M1)
+
+  return(list(Mean,Var))
+}
+
+# Function returning accepted y value
+samp_accp <- function(num,Mean,Var,pn) {
+  
+  yi <- rnorm(1,Mean,sqrt(abs(Var)))
+  countit <- 0 
+  while( (sign(yi)!=sign(pn[num])) & (is.na(yi) != TRUE) ) {
+    if (countit < 5000) {
+      yi <- rnorm(1,Mean,sqrt(abs(Var)))
+      countit <- countit + 1
+    } else {
+      yi <- NA
+    }
+  }
+  return(yi)
+}
+
+
+# GP samples
+Krig_samples <- function(fD, D1=Ddata, Data=Data2) {
+  outmodel1 <- km(formula=~., design=D1, response=fD, covtype='matern3_2')
+  predmodel1 <- predict(outmodel1, as.matrix(Data), type='UK')
+  
+  mstar <- predmodel1$mean
+  return(mstar)
+}
+```
+
+```{r Class2, include=FALSE, eval=FALSE, echo=FALSE}
+# GP classification
+m <- 2 # Dimension
+
+N1 <- dim(XWolf1)[1] # Number of points in each region
+N0 <- dim(XWolf0)[1]
+
+Ddata <- as.matrix(rbind(XWolf1,XWolf0)) # Full data
+
+# Run MCMC to calculate latent values
+
+itno <- 50000 # no. of iterations
+
+count <- 0 
+MCMCoutput <- metropnd(iterations=itno, eps=0.8, startvalue=c(0,-1,1,1,1,1), D=Ddata, n1=N1, n2=N0) 
+
+# Acceptance rate
+MCMCoutput[[2]]/itno
+
+# Trace plots
+a1 <- ggplot() +
+  geom_line(aes(x=seq(1, length(MCMCoutput[[1]][,1])), y=MCMCoutput[[1]][,1])) + xlab("Index") + ylab(TeX("$beta_0$"))
+b1 <- ggplot() +
+  geom_line(aes(x=seq(1, length(MCMCoutput[[1]][,2])), y=MCMCoutput[[1]][,2])) + xlab("Index") + ylab(TeX("$beta_1$"))
+c1 <- ggplot() +
+  geom_line(aes(x=seq(1, length(MCMCoutput[[1]][,3])), y=MCMCoutput[[1]][,3])) + xlab("Index") + ylab(TeX("$beta_2$"))
+d1 <- ggplot() +
+  geom_line(aes(x=seq(1, length(MCMCoutput[[1]][,4])), y=MCMCoutput[[1]][,4])) + xlab("Index") + ylab(TeX("$sigma^2$"))
+e1 <- ggplot() +
+  geom_line(aes(x=seq(1, length(MCMCoutput[[1]][,5])), y=MCMCoutput[[1]][,5])) + xlab("Index") + ylab(TeX("$delta_1$"))
+f1 <- ggplot() +
+  geom_line(aes(x=seq(1, length(MCMCoutput[[1]][,6])), y=MCMCoutput[[1]][,6])) + xlab("Index") + ylab(TeX("$delta_2$"))
+grid.arrange(a1,b1,c1,d1,e1,f1,nrow=2)
+
+# Burn-in
+burnno <- 1000
+out_new <- MCMCoutput[[1]][(burnno:itno),]
+
+a2 <- ggplot() +
+  geom_line(aes(x=seq(1, length(out_new[,1])), y=out_new[,1])) + xlab("Index") + ylab(TeX("$beta_0$"))
+b2 <- ggplot() +
+  geom_line(aes(x=seq(1, length(out_new[,2])), y=out_new[,2])) + xlab("Index") + ylab(TeX("$beta_1$"))
+c2 <- ggplot() +
+  geom_line(aes(x=seq(1, length(out_new[,3])), y=out_new[,3])) + xlab("Index") + ylab(TeX("$beta_2$"))
+d2 <- ggplot() +
+  geom_line(aes(x=seq(1, length(out_new[,4])), y=out_new[,4])) + xlab("Index") + ylab(TeX("$sigma^2$"))
+e2 <- ggplot() +
+  geom_line(aes(x=seq(1, length(out_new[,5])), y=out_new[,5])) + xlab("Index") + ylab(TeX("$delta_1$"))
+f2 <- ggplot() +
+  geom_line(aes(x=seq(1, length(out_new[,6])), y=out_new[,6])) + xlab("Index") + ylab(TeX("$delta_2$"))
+grid.arrange(a2,b2,c2,d2,e2,f2,nrow=2)
+
+
+# EITHER sample directly from posterior distribution
+# OR sample conditionally
+
+###
+# Option 1: Sample directly (expensive)
+###
+
+SampOut <- c()
+
+for (ij in 1:dim(out_new)[1]) {
+  #print(ij)
+  SO <- Sampfun(out_new[ij,], Nn=N1+N0, Dd=Ddata, N1=N1, N2=N0)
+  if (is.na(SO[1]) == FALSE) {
+    SampOut <- rbind(SampOut, c(out_new[ij,],SO))
+  }
+  
+}
+
+###
+# Option 2: Sample conditionally
+###
+
+#Ddata01 <- cbind(Ddata, c(rep(0,N1),rep(1,N2)))
+#outGPs <- apply(out_new, 1, condsamp, Dnew=Ddata01)
+
+#totalpoints <- outGPs[[1]][[1]]
+
+#for (k in 2:dim(out_new)[1]) {
+#  totalpoints <- cbind(totalpoints,outGPs[[k]][[1]])
+#}
+
+#dim(totalpoints)
+
+#newout <- t(totalpoints)  # All latent points
+#SampOut <- cbind(newout,out_new) # Points and parameters
+
+#for (ij in 1:n) {
+#  newout <- newout[(is.na(newout[,n]) == FALSE),]
+#  SampOut <- SampOut[(is.na(SampOut[,n]) == FALSE),]
+#}
+
+
+
+##########
+
+SampPar <- SampOut[,(1:6)]
+SampVal <- SampOut[,(7:dim(SampOut)[2])]
+
+post2 <- apply(SampVal,2,sort)
+
+lp <- dim(post2)[1]
+
+# Predict classification across input space
+
+medpoints <- post2[round(lp/2),]
+minp <- post2[round((lp*0.05)/2),]
+maxp <- post2[round(lp-((lp*0.05)/2)),]
+
+# Training data
+fD <- medpoints
+D <- Ddata
+
+# Set number of data points and parameters
+n <- dim(D)[1]
+p <- dim(D)[2]
+q <- p+1
+
+# Training data to fit the GP
+xx <- seq(0,1,0.01) 
+D2 <- expand.grid(xx,xx)
+Data2 <- data.frame(
+  Sheep=D2[,1],
+  Wolves=D2[,2]
+)
+
+# Fit GP
+library(DiceKriging)
+outmodel <- km(formula=~., design=as.matrix(Ddata), response=fD, covtype = 'matern3_2')
+predmodel <- predict(outmodel, as.matrix(Data2), type='UK')
+
+PM <- predmodel$mean
+PM1 <- PM
+PM1[PM < 0] <- 'Yes'
+PM1[PM > 0] <- 'No'
+
+# Plot
+ggplot() +
+  geom_tile(aes(x=D2[,1], y=D2[,2], fill=PM1), alpha=0.6) +
+  scale_fill_manual(values=c("#D55E00","#009E73")) +
+  geom_point(aes(x=Ddata[,1], y=Ddata[,2]), size=2) +
+  xlab(TeX('Sheep Reproduction')) + ylab(TeX('Wolf Reproduction')) + labs(fill=TeX('Wolves Extinct'))
+
+
+# Find GP samples to find classification uncertainty
+PredSamp <- t(apply(SampVal, 1, Krig_samples))
+PredSamp2 <- PredSamp
+
+PredSamp2[PredSamp < 0] <- 1
+PredSamp2[PredSamp > 0] <- 0
+
+SampPer <- apply(PredSamp2, 2, sum)/dim(PredSamp2)[1]
+
+ggplot() +
+  geom_raster(aes(x=D2[,1], y=D2[,2], fill=SampPer), alpha=0.8) +
+  scale_fill_gradientn(colours=c("#D55E00","#009E73")) +
+  geom_point(aes(x=Ddata[,1], y=Ddata[,2]), size=2) +
+  xlab(TeX('Sheep Reproduction')) + ylab(TeX('Wolf Reproduction')) + labs(fill=TeX('Prob of Extinct'))
+
+
+# Store classified inputs for future code
+Data_W1 <- Data2[(PM1 == 'Yes'),]
+Data_W0 <- Data2[(PM1 == 'No'),]
+
+```
+
+
+## Stochastic Gaussian Processes
+
+After finding the classification estimate, we then fit an emulator to the initial data points where a quantitative model output exists. Since the sheep and wolf predator-prey model is stochastic, deterministic Gaussian processes are no longer suitable and we must use a heteroskedastic Gaussian process as described above. We have provided code below for two cases: when there are many replicates at each data point or when there are few (or none). If using the data supplied in <tt> DataSW.csv </tt> we suggest using the latter code since we have few replicates at each of our design points. Here, we have chosen to fit a stochastic Gaussian process using the HetGP package [@Binois2018a]. 
+
+### Many Replicates
+
+If we have many replicated runs of the model at each of the design points, a common approach in the literature is to fit an independent Gaussian process to $\tau^{2}(\textbf{x})$ [@Baker2022; @Goldberg1997; @Ankenman2010].  Let $\textbf{X}' = \{ \textbf{x}'_{1}, \ldots, \textbf{x}'_{n} \}$ for $n \ll N$ represent the unique inputs within $\textbf{X}$.  If there are enough replicates at each of the design points,  we can approximate both $F$ and $\tau^{2}$ by calculating the sample means and sample variances:
+$$
+\begin{split}
+\bar{y}(\textbf{x}'_{i}) &=  \frac{1}{r_{i}} \sum_{j=1}^{r_{i}} f(\textbf{x}_{ij}), \\
+s^{2}(\textbf{x}'_{i}) &=  \frac{1}{r_{i}-1} \sum_{j=1}^{r_{i}} (f(\textbf{x}_{ij}) - \bar{y}(\textbf{x}'_{i}))^{2},
+\end{split}
+$$
+where $r_{i}$ is the number of replicates at $\textbf{x}'_{i}$ for $i=1, \ldots, n$,  and where $j$ are the indices representing the replicates at each $\textbf{x}'_{i}$.  Hence $f(\textbf{x}_{ij})$ is the $j^{\text{th}}$ replicated output from running the model at input $\textbf{x}'_{i}$.  Homoscedastic GPs can then be used for the mean and log of the variance. [@Goldberg1997; @Ankenman2010; @Kersting2007; @Boukouvalas2009].
+
+
+```{r GP2}
+# Load in data again
+Data <- read.csv('DataSW.csv')
+
+Ddata <- Data[,2:3]/20
+YData <- Data[,4:dim(Data)[2]]
+YWolf <- YData[,(seq(2,dim(YData)[2],2))]
+YSheep <- YData[,(seq(1,dim(YData)[2],2))]
+
+WData <- cbind(Ddata, YWolf)
+
+XWolf1 <- WData[is.na(WData[,3])==FALSE,(1:2)]
+YWolf1 <- WData[is.na(WData[,3])==FALSE,(3:dim(WData)[2])]
+
+XWolf0 <- WData[is.na(WData[,3])==TRUE,(1:2)]
+
+colours <- c('Yes'="#009E73", 'No'="#D55E00")
+ggplot() +
+  geom_point(aes(x=XWolf1[,1], y=XWolf1[,2], col='Yes'), size=3) +
+  geom_point(aes(x=XWolf0[,1], y=XWolf0[,2], col='No'), size=3) +
+  scale_color_manual(values=colours) +
+  xlab(TeX('Sheep Reproduction')) + ylab(TeX('Wolf Reproduction')) + labs(colour=TeX('Wolves Extinct'))
+
+# Calculate sample mean and sample variance
+YW_Mean <- apply(YWolf1, 1, mean)
+YW_Var <- apply(YWolf1, 1, var)
+
+# Kriging - uncomment for kriging GP method
+#modelMean <- km(formula=~., design=as.matrix(XWolf1), response=log(YW_Mean), covtype = 'matern3_2')
+#predMean <- predict(modelMean, as.matrix(Data_W1), type='UK')
+
+#modelVar <- km(formula=~., design=as.matrix(XWolf1), #response=sqrt(log(YW_Var)), covtype = 'matern5_2')
+#predVar <- predict(modelVar, as.matrix(Data_W1), type='UK')
+
+# RobustGasp 
+modelMean <- rgasp(design = XWolf1, response = log(YW_Mean), kernel_type = "matern_3_2")
+predMean <- predict(modelMean, testing_input=as.matrix(Data_W1))
+
+modelVar <- rgasp(design = XWolf1, response = sqrt(log(YW_Var)), kernel_type = "matern_3_2")
+predVar <- predict(modelVar, testing_input=as.matrix(Data_W1))
+
+# Plot predicted mean response and variance
+a1 <- ggplot() +
+  geom_raster(aes(x=Data_W1[,1], y=Data_W1[,2], fill=exp(predMean$mean))) +
+  scale_fill_gradientn(colours=c('white',"#009E73")) +
+  geom_tile(aes(x=Data_W0[,1], y=Data_W0[,2]), fill="#D55E00", alpha=0.6) +
+  geom_point(aes(x=Ddata[,1], y=Ddata[,2]), size=2) +
+  xlab(TeX('Sheep Reproduction')) + ylab(TeX('Wolf Reproduction')) + labs(fill=TeX('Time to Extinct'))
+
+a2 <- ggplot() +
+  geom_raster(aes(x=Data_W1[,1], y=Data_W1[,2], fill=exp(predVar$mean)^2)) +
+  scale_fill_gradientn(colours=c('white',"#009E73")) +
+  geom_tile(aes(x=Data_W0[,1], y=Data_W0[,2]), fill="#D55E00", alpha=0.6) +
+  geom_point(aes(x=Ddata[,1], y=Ddata[,2]), size=2) +
+  xlab(TeX('Sheep Reproduction')) + ylab(TeX('Wolf Reproduction')) + labs(fill=TeX('Variance'))
+
+grid.arrange(a1,a2, ncol=2)
+```
+
+### Few Replicates
+
+When there are very few replicates, the sample statistics for the mean and variance are not good estimates for the true mean and heteroscedasticity. A common choice is to consider the intrinsic variances $\tau^{2}$ to be latent parameters where a computationally efficient approach was developed by @Binois2018a, known as hetGP.  First define the latent variables to be $\Lambda_{n} = (\lambda(\textbf{x}'_{1}),  \ldots, \lambda(\textbf{x}'_{n}))$ with $\lambda(\textbf{x}) = \frac{\tau^{2}(\textbf{x})}{\sigma^{2}}$, where $\sigma^{2}=k(\textbf{x},\textbf{x})$ is the variance parameter of the GP.  The goal is to learn the values in $\Lambda_{n}$, which is expensive if done via MCMC. They solve this issue by modelling the log variances as the mean output of a GP on latent variables as well as using Woodbury identities to reduce the number of latent variables and replicates at each design point are not required. 
+
+The authors assume a GP prior for $\text{log} \, \lambda$ that constrains $\text{log} \Lambda_{n}$ to have a multivariate Normal distribution.  Following this, they state that $\lambda_{1}, \ldots, \lambda_{n}$ from $\Lambda_{n}$ become quantities from the predictive mean of a GP trained on new latent variables $\Delta_{n} = \text{diag}(\delta_{1}, \ldots, \delta_{n})$.  If the covariance function of $\Delta_{n}$ is $C_{(g)} (C_{(g)} + g R^{-1})$ with $R_{n} = \text{diag}(r_{1}, \ldots, r_{n})$, then assuming the GP has zero mean, the following holds:
+$$
+\text{log} \Lambda_{n} = C_{(g)} (C_{(g)} + g R_{n}^{-1})^{-1} \Delta_{n}
+$$
+where $C_{(g)}$ with $K_{n} + \tau^{2}(\textbf{x})  I_{n} = \sigma^{2}(C_{n} +\Lambda_{n})$ is a correlation function with nugget parameter $g$. This approach enables smooth estimation of $\Lambda_{n}$ and provides a fixed functional form for $\lambda(x)$. However, it does not account for the uncertainty introduced by the estimation of the intrinsic variance $\tau^{2}(\textbf{x})$ when making predictions.  The estimates for $\tau^{2}(\textbf{x})$ are assumed without error and so no uncertainty is included in predictions. With $\Lambda_{n}$ specified, the Woodbury identities simplify the likelihood computation for $\textbf{y}$ which includes all outputs and replicates, reducing the dependence to quantities of size $n$. The unknown parameters can then be estimated using maximum likelihood at a computational complexity of $O(n^{3})$.
+
+```{r HetGP1}
+# Load in data again
+Data <- read.csv('DataSW.csv')
+
+Ddata <- Data[,2:3]/20
+YData <- Data[,4:dim(Data)[2]]
+YWolf <- YData[,(seq(2,dim(YData)[2],2))]
+YSheep <- YData[,(seq(1,dim(YData)[2],2))]
+
+WData <- cbind(Ddata, YWolf)
+
+XWolf1 <- WData[is.na(WData[,3])==FALSE,(1:2)]
+YWolf1 <- WData[is.na(WData[,3])==FALSE,(3:dim(WData)[2])]
+
+XWolf0 <- WData[is.na(WData[,3])==TRUE,(1:2)]
+
+colours <- c('Yes'="#009E73", 'No'="#D55E00")
+ggplot() +
+  geom_point(aes(x=XWolf1[,1], y=XWolf1[,2], col='Yes'), size=3) +
+  geom_point(aes(x=XWolf0[,1], y=XWolf0[,2], col='No'), size=3) +
+  scale_color_manual(values=colours) +
+  xlab(TeX('Sheep Reproduction')) + ylab(TeX('Wolf Reproduction')) + labs(colour=TeX('Wolves Extinct'))
+
+
+# Put data into format for HetGP
+Xhet <- as.matrix(do.call("rbind", rep(list(XWolf1), 10)))
+Yhet <- as.vector(as.matrix(YWolf1))
+
+# Fit HetGP
+hetgpmod <- mleHetGP(X=Xhet, Z=Yhet)
+hetpred <- predict(hetgpmod, as.matrix(Data_W1), noise.var=TRUE)
+predmu <- hetpred$mean
+predvar <- hetpred$sd2 + hetpred$nugs
+
+# Plot predicted mean response and variance
+a1 <- ggplot() +
+  geom_raster(aes(x=Data_W1[,1], y=Data_W1[,2], fill=predmu)) +
+  scale_fill_gradientn(colours=c('white',"#009E73")) +
+  geom_tile(aes(x=Data_W0[,1], y=Data_W0[,2]), fill="#D55E00", alpha=0.6) +
+  geom_point(aes(x=Ddata[,1], y=Ddata[,2]), size=2) +
+  xlab(TeX('Sheep Reproduction')) + ylab(TeX('Wolf Reproduction')) + labs(fill=TeX('Time to Extinct'))
+
+a2 <- ggplot() +
+  geom_raster(aes(x=Data_W1[,1], y=Data_W1[,2], fill=predvar)) +
+  scale_fill_gradientn(colours=c('white',"#009E73")) +
+  geom_tile(aes(x=Data_W0[,1], y=Data_W0[,2]), fill="#D55E00", alpha=0.6) +
+  geom_point(aes(x=Ddata[,1], y=Ddata[,2]), size=2) +
+  xlab(TeX('Sheep Reproduction')) + ylab(TeX('Wolf Reproduction')) + labs(fill=TeX('Variance'))
+
+grid.arrange(a1,a2, ncol=2)
+```
+
+
+### Validation
+
+While Gaussian processes provide uncertainty estimates along with predictions, it is still crucial to perform validation - the GP can overfit if the hyperparameters are not properly tuned. Validation ensures that the GP is neither overfitted or underfitted as well as ensuring it performs well on unseen data.
+
+Leave-One-Out Cross-Validation (LOO-CV) is a method used to assess the performance of a model by systematically removing one data point at a time, training the model on the remaining data, and then testing it on the excluded point. This process is repeated for each data point in the dataset, and the overall performance is evaluated based on the overall prediction errors. Typically this is the root mean squared error (RMSE).
+
+In the following plots, both the sheep reproduction and the wolf reproduction are plotted against the time to wolf extinction. The leave-one-out prediction is plotted in navy along with +/- two standard deviations from the GP. The true outputs are also plotted in green if they lie within two standard deviations from the mean, and red otherwise.
+
+```{r ValGP1}
+# Perform leave-one-out cross-validation from the hetGP
+LOOHGP <- LOO_preds(hetgpmod)
+
+# Calculate +/- two standard deviations away from the mean
+vstar1 <- LOOHGP$mean + 2 * (sqrt(LOOHGP$sd2))
+vstar2 <- LOOHGP$mean - 2 * (sqrt(LOOHGP$sd2))
+
+# Include check to see which are in/out 
+p <- 2
+alldata <- cbind(as.matrix(XWolf1), as.vector(YW_Mean), as.vector(LOOHGP$mean), as.vector(vstar1), as.vector(vstar2))
+alldata1 <- alldata[((alldata[,(p+1)] < alldata[,(p+3)]) & (alldata[,(p+1)] > alldata[,(p+4)])),]
+alldata2 <- alldata[((alldata[,(p+1)] > alldata[,(p+3)]) | (alldata[,(p+1)] < alldata[,(p+4)])),]
+  
+if (is.null(dim(alldata1)) == TRUE) {
+  loo_data1 <- data.frame(
+    x1_1 = alldata1[1],
+    x2_1 = alldata1[2],
+    y1_1 = alldata1[p+1]
+  )
+} else{
+  loo_data1 <- data.frame(
+    x1_1 = alldata1[,1],
+    x2_1 = alldata1[,2],
+    y1_1 = alldata1[,(p+1)]
+  )
+}
+if (is.null(dim(alldata2)) == TRUE) {
+  loo_data2 <- data.frame(
+    x1_2 = alldata2[1],
+    x2_2 = alldata2[2],
+    y1_2 = alldata2[p+1]
+  )
+} else{
+  loo_data2 <- data.frame(
+    x1_2 = alldata2[,1],
+    x2_2 = alldata2[,2],
+    y1_2 = alldata2[,(p+1)]
+  )
+}
+
+b1 <- ggplot() + 
+  geom_segment(aes(x=XWolf1[,1], y=vstar2, xend=XWolf1[,1], yend=vstar1), colour='navy', size=1) +
+  geom_point(aes(x=XWolf1[,1], y=LOOHGP$mean), colour='navy', size=4) +
+  geom_point(data=loo_data1, aes(x=x1_1, y=y1_1), colour='chartreuse3', size=4) +
+  geom_point(data=loo_data2, aes(x=x1_2, y=y1_2), colour='firebrick3', size=4) +
+  ylab(TeX('Time to Extinct')) + xlab(TeX('Sheep Reproduction')) 
+b2 <- ggplot() + 
+  geom_segment(aes(x=XWolf1[,2], y=vstar2, xend=XWolf1[,2], yend=vstar1), colour='navy', size=1) +
+  geom_point(aes(x=XWolf1[,2], y=LOOHGP$mean), colour='navy', size=4) +
+  geom_point(data=loo_data1, aes(x=x2_1, y=y1_1), colour='chartreuse3', size=4) +
+  geom_point(data=loo_data2, aes(x=x2_2, y=y1_2), colour='firebrick3', size=4) +
+  ylab(TeX('Time to Extinct')) + xlab(TeX('Wolf Reproduction')) 
+
+grid.arrange(b1,b2, ncol=2)
+```
+
+Alternatively, validation can be performed using a separate test set such that the available data is split into training and test sets. The model is trained on the training set, and its performance is evaluated on the test set, which contains unseen data. This method particularly helps assess how well the model generalises to new data. Again, performance is evaluated based on the overall prediction errors. Given a test set $D_{t} = \{ \textbf{X}_{t}, f(\textbf{X}_{t}) \}_{t=1}^{t=N}$, the RMSE is given by:
+$$
+\text{RMSE}_{m} = \sqrt{\frac{\Big(\sum_{t=1}^{N}\big(m^{*}(\textbf{x}_{t}) - \bar{y}(\textbf{x}_{t})\big)^{2}\Big)}{N}},  \, \, \, \text{RMSE}_{\tau} = \sqrt{\frac{\Big(\sum_{t=1}^{N}\big(k^{*}(\textbf{x}_{t}) - s^{2}(\textbf{x}_{t})\big)^{2}\Big)}{N}},
+$$
+where $\text{RMSE}_{m}$ is the RMSE evaluated on the mean response,  $\text{RMSE}_{\tau}$ is the RMSE evaluated on the variance output and where $m^{*}(\textbf{x}_{\tau})$ and $k^{*}(\textbf{x}_{\tau})$ are the expected mean and variance output of the GP at input $\textbf{x}_{t}$. A test set consisting of 50 points with 25 replications at each point is contained in <tt> DataSW_Test.csv </tt>.
+
+```{r ValGP2}
+# Load in test data 
+DataT <- read.csv('DataSW_Test.csv')
+DataT_Mean <- apply(DataT[,(4:28)], 1, mean)
+DataT_Var <- apply(DataT[,(4:28)], 1, var)
+# Predict output of test points from the hetGP
+hetpred <- predict(hetgpmod, as.matrix(DataT[,(2:3)]/20), noise.var=TRUE)
+predmu <- hetpred$mean
+predvar <- hetpred$sd2 + hetpred$nugs
+
+# Calculate +/1 two standard deviations away from the mean
+vstar1 <- predmu + 2 * (sqrt(predvar))
+vstar2 <- predmu - 2 * (sqrt(predvar))
+
+# Include check to see which are in/out 
+alldata <- cbind(as.matrix(DataT[,(2:3)]/20), as.vector(DataT_Mean), as.vector(predmu), as.vector(vstar1), as.vector(vstar2))
+alldata1 <- alldata[((alldata[,(p+1)] < alldata[,(p+3)]) & (alldata[,(p+1)] > alldata[,(p+4)])),]
+alldata2 <- alldata[((alldata[,(p+1)] > alldata[,(p+3)]) | (alldata[,(p+1)] < alldata[,(p+4)])),]
+  
+if (is.null(dim(alldata1)) == TRUE) {
+  loo_data1 <- data.frame(
+    x1_1 = alldata1[1],
+    x2_1 = alldata1[2],
+    y1_1 = alldata1[p+1]
+  )
+} else{
+  loo_data1 <- data.frame(
+    x1_1 = alldata1[,1],
+    x2_1 = alldata1[,2],
+    y1_1 = alldata1[,(p+1)]
+  )
+}
+if (is.null(dim(alldata2)) == TRUE) {
+  loo_data2 <- data.frame(
+    x1_2 = alldata2[1],
+    x2_2 = alldata2[2],
+    y1_2 = alldata2[p+1]
+  )
+} else{
+  loo_data2 <- data.frame(
+    x1_2 = alldata2[,1],
+    x2_2 = alldata2[,2],
+    y1_2 = alldata2[,(p+1)]
+  )
+}
+
+c1 <- ggplot() + 
+  geom_segment(aes(x=DataT[,2]/20, y=vstar2, xend=DataT[,2]/20, yend=vstar1), colour='navy', size=1) +
+  geom_point(aes(x=DataT[,2]/20, y=predmu), colour='navy', size=4) +
+  geom_point(data=loo_data1, aes(x=x1_1, y=y1_1), colour='chartreuse3', size=4) +
+  geom_point(data=loo_data2, aes(x=x1_2, y=y1_2), colour='firebrick3', size=4) +
+  ylab(TeX('Time to Extinct')) + xlab(TeX('Sheep Reproduction')) 
+c2 <- ggplot() + 
+  geom_segment(aes(x=DataT[,3]/20, y=vstar2, xend=DataT[,3]/20, yend=vstar1), colour='navy', size=1) +
+  geom_point(aes(x=DataT[,3]/20, y=predmu), colour='navy', size=4) +
+  geom_point(data=loo_data1, aes(x=x2_1, y=y1_1), colour='chartreuse3', size=4) +
+  geom_point(data=loo_data2, aes(x=x2_2, y=y1_2), colour='firebrick3', size=4) +
+  ylab(TeX('Time to Extinct')) + xlab(TeX('Wolf Reproduction')) 
+
+grid.arrange(c1,c2, ncol=2)
+
+# Calculate RMSE
+# Mean
+RMSE1 <- ((DataT_Mean - predmu)^2)
+RMSE2 <- (sqrt(sum(RMSE1)/length(DataT_Mean)))
+print(RMSE2)
+# Variance
+RMSE3 <- ((DataT_Var - predvar)^2)
+RMSE4 <- (sqrt(sum(RMSE3)/length(DataT_Var)))
+print(RMSE4)
+```
+
+
+## Sequential Design
+
+The accuracy of the fit of any emulator is greatly dependent on the design of the training input points [@Sacks1989; @Santner2003; @Simpson2001]. It is important that the location of these points in the input space are space filling, but also capture the important features of the physical system. This is more commonly known as the trade-off between exploration and exploitation [@Garud2017]. The Latin hypercube used previously is an example of a one-shot method where all design points are chosen at once and exhaust the computational budget immediately.  A sequential design method instead selects samples one (or more) at a time using information from the emulator or existing points.  Sequential designs allow us to stop the computationally expensive sampling process as soon as the emulator reaches an acceptable level of accuracy. There is also an increased chance of exploitation, where more samples are selected in interesting areas of input space (e.g. minimums and maximums).
+
+Many examples of sequential designs aim to minimise the predictive variance of the Gaussian process, or the mean squared error. The predictive variance is seen as an estimation of the real prediction error which increases away from existing data points. We then place new points in these areas to promote a space-filling design. Examples of current widely used design methods include minimum predictive uncertainty or mean squared error [@Sacks1989], maximum entropy [@Shewry1987], mutual information [@Krause2008], expected squared leave-one-out cross-validation, and expected improvement [@Mohammadi2022].  
+
+For stochastic models, we are interested in learning both the mean and variance across the input space.  At every iteration we have the choice to either select a new point to improve the mean estimate, or to select a point to replicate at from the existing input design. Replicates will have a greater influence on the intrinsic variance estimate. A well known method for sequential design for stochastic models is based on reducing the integrated mean squared prediction error (IMSPE) developed by [@Binois2018b] with HetGP.  The approach starts with a space-filling design with an initial allocation of replicates at each point. A GP is fitted to this design using HetGP and  the IMSPE of the design is estimated. At each iteration, either a new point (from a set of candidates) or a replicate is included in the new design if it minimises the new potential IMSPE.
+
+An alternative was developed by [@Kimpton2025], which is an extension of the expected squared leave-one-out (ES-LOO) method by [@Mohammadi2022] to stochastic models. We first build a hetGP on an initial design and calculate the expected squared leave-one-out cross-validation (LOO-CV) error. To apply this over the whole input space we model the LOO-CV error as a GP and find the maximum using a variation of expected improvement (see [@Mohammadi2022]). The expected improvement is combined with a repulsion function to ensure a high level of space filling is achieved. To also ensure that we balance the relationship between exploration and replication, we select both a new point and replicate simultaneously based on adaptations of the ES-LOO criterion. The optimum choice between these candidates (new point or replicate) is given by the design with maximal entropy.   
+
+Both of these methods can either choose the next point by maximising the selection criteria, or by choosing a point from a predefined candidate set. Both versions of the code are supplied below with the candidate set defined as the test set from the validation above (<tt> DataSW_Test.csv </tt>). This is for demonstration purposes and will not give optimum results due to the size of the set.
+
+
+### Method I - hetGP IMSPE
+
+The following code uses the IMSPE sequential design method [@Binois2018b]. We have sampled one extra point (although $q$ points can be chosen at a time) where the location of the new point chosen given by the red cross.
+
+```{r IMSPE1}
+# Design using hetGP and IMSPE
+
+# Put data into format for HetGP
+Xhet <- as.matrix(do.call("rbind", rep(list(XWolf1), 10)))
+Yhet <- as.vector(as.matrix(YWolf1))
+
+# Fit initial HetGP
+hetgpmod <- mleHetGP(X=Xhet, Z=(Yhet))
+
+pred <- predict(hetgpmod, as.matrix(DataT[,(2:3)]/20), noise.var=TRUE)
+predmu <- pred$mean
+predvar <- pred$sd2 + pred$nugs
+
+# Initial RMSE
+# Mean
+RMSE1 <- ((DataT_Mean - predmu)^2)
+RMSE2 <- (sqrt(sum(RMSE1)/length(DataT_Mean)))
+print(RMSE2)
+# Variance
+RMSE3 <- ((DataT_Var - predvar)^2)
+RMSE4 <- (sqrt(sum(RMSE3)/length(DataT_Var)))
+print(RMSE4)
+
+# EITHER chose new points to be run through the ABM before being included in the training data
+# Candidate points for selection (so that no design points are 
+# chosen in region where wolves don't go to extinction)
+#Xcand1 <- as.matrix(rbind(XWolf1, as.matrix(Data_W1)))
+
+# OR chose a new point from the test set used in validation above - output can be included in training data
+Xcand1 <- as.matrix(rbind(XWolf1, as.matrix(DataT[,(2:3)]/20)))
+
+# Select new point
+SDhetGP <- IMSPE_optim(hetgpmod, Xcand=Xcand1)
+SDhetGP$par
+SDhetGP$par*20
+
+pred <- predict(hetgpmod, as.matrix(Data_W1), noise.var=TRUE)
+predmu <- pred$mean
+predvar <- pred$sd2 + pred$nugs
+
+# Plot with new point - given in red
+ggplot() +
+  geom_raster(aes(x=Data_W1[,1], y=Data_W1[,2], fill=predmu)) +
+  scale_fill_gradientn(colours=c('white',"#009E73")) +
+  geom_tile(aes(x=Data_W0[,1], y=Data_W0[,2]), fill="#D55E00", alpha=0.6) +
+  geom_point(aes(x=Ddata[,1], y=Ddata[,2]), size=2) +
+  geom_point(aes(x=SDhetGP$par[1], y=SDhetGP$par[2]), col='firebrick3', size=5, shape=4, stroke=4) +
+  xlab(TeX('Sheep Reproduction')) + ylab(TeX('Wolf Reproduction')) + labs(fill=TeX('Time to Extinct'))
+
+# Re-fit HetGP
+Xhet <- rbind(Xhet, as.matrix(DataT[,(2:3)]/20)[which((DataT[,(2:3)]/20) == SDhetGP$par),])
+Yhet <- c(Yhet, DataT[,4][which((DataT[,(2:3)]/20) == SDhetGP$par)])
+hetgpmod <- mleHetGP(X=Xhet, Z=(Yhet))
+pred <- predict(hetgpmod, as.matrix(DataT[,(2:3)]/20), noise.var=TRUE)
+predmu <- pred$mean
+predvar <- pred$sd2 + pred$nugs
+
+# New RMSE
+# Mean
+RMSE1 <- ((DataT_Mean - predmu)^2)
+RMSE2 <- (sqrt(sum(RMSE1)/length(DataT_Mean)))
+print(RMSE2)
+# Variance
+RMSE3 <- ((DataT_Var - predvar)^2)
+RMSE4 <- (sqrt(sum(RMSE3)/length(DataT_Var)))
+print(RMSE4)
+```
+
+### Method II - stochastic ES-LOO
+
+The following code uses the stochastic ES-LOO design method [@Kimpton2025]. Again, we have sampled one extra point where the location of the new point chosen given by the red cross.
+
+```{r SeqDes1,  include=FALSE, echo=FALSE}
+
+new_OR_rep_GRID <- function(Xx, XPN, Yy, HetGP, c) {
+  
+  # Best new point
+  New_Point <- SD_New_Point_2d(X=Xx, Y=Yy, HetGP1=HetGP, Xpred=XPN)
+  # Best replicate
+  New_Replicate2 <- SD_replicate_2d(X=Xx, Y=Yy, HetGP1=HetGP)
+  
+  # Entropy G
+  rx0_new <- predict(object=HetGP, x=as.matrix(Xx), xprime=(New_Point$x_newN))
+  rx0_rep <- predict(object=HetGP, x=as.matrix(Xx), xprime=(matrix(New_Replicate2$x_newR,(length(New_Replicate2$x_newR))/2, 2)) )
+  
+  Rn <- predict(object=HetGP, x=Xx, xprime=Xx)
+  Rnr <- Rn$cov + diag(Rn$nugs)
+  IRn <- chol2inv(chol(Rnr + 0.00001*diag(dim(Xx)[1])))
+  
+  NewP <- (t(rx0_new$cov) %*% IRn %*% rx0_new$cov)
+  NewPx <- New_Point$x_newN
+  
+  NewR1 <- t(rx0_rep$cov) %*% IRn %*% (rx0_rep$cov)
+  NewR2 <- diag(NewR1) * c
+  NewR <- max(NewR2)
+  NewRx <- (matrix(New_Replicate2$x_newR,(length(New_Replicate2$x_newR))/2, 2))[which.max(NewR2),]
+  
+  if (NewP > NewR) {
+    NextP <- NewPx
+    NextW <- 'New Point'
+  } else {
+    NextP <- NewRx
+    NextW <- 'Replicate'
+  }
+  return(list(NextP = NextP, NextW = NextW))
+}
+
+
+new_OR_rep_OPT <- function(Xx, Yy, HetGP, c) {
+  
+  Dim <- dim(Xx)[2]
+  lb <- rep(0, Dim)
+  ub <- rep(1, Dim)
+  New_Point <- DEoptim(fn=SD_New_Point_OPT, lower = lb, upper = ub,
+    control = list(NP = 10*Dim, itermax = 10, trace = FALSE),
+    Xx1=Xx, Yy1=Yy, HetGP1=HetGP, NoPP=3)$optim
+  New_Replicate2 <- SD_replicate_2d(X=Xx, Y=Yy, HetGP1=HetGP)
+  
+  New_Point$x_newN <- matrix(New_Point$bestmem, 1, Dim)
+
+  rx0_new <- predict(object=HetGP, x=as.matrix(Xx), xprime=(New_Point$x_newN))
+  rx0_rep <- predict(object=HetGP, x=as.matrix(Xx), xprime=(matrix(New_Replicate2$x_newR,(length(New_Replicate2$x_newR))/dim(Xx)[2], dim(Xx)[2])) )
+  
+  Rn <- predict(object=HetGP, x=Xx, xprime=Xx)
+  Rnr <- Rn$cov + diag(Rn$nugs)
+  IRn <- chol2inv(chol(Rnr + 0.00001*diag(dim(Xx)[1])))
+  
+  NewP <- (t(rx0_new$cov) %*% IRn %*% rx0_new$cov)
+  NewPx <- New_Point$x_newN
+  
+  NewR1 <- t(rx0_rep$cov) %*% IRn %*% (rx0_rep$cov)
+  NewR2 <- c * diag(NewR1)
+  NewR <- max(NewR2)
+  NewRx <- (matrix(New_Replicate2$x_newR,(length(New_Replicate2$x_newR))/dim(Xx)[2], dim(Xx)[2]))[which.max(NewR2),]
+  
+  if (NewP > NewR) {
+    NextP <- NewPx
+    NextW <- 'New Point'
+  } else {
+    NextP <- NewRx
+    NextW <- 'Replicate'
+  }
+  return(list(NextP = NextP, NextW = NextW))
+}
+
+SD_New_Point_2d <- function(X, Y, Xpred, HetGP1, NoPP=5) {
+  
+  Xs <- unique(X)
+  Rep_count <- apply(Xs, 1, function(xs1) sum(apply(X, 1, function(X1) identical(xs1, X1))))
+  Ys <- apply(Xs, 1, function(xs1) mean(Y[apply(X, 1, function(X1) identical(xs1, X1))]))
+  predO <- predict(HetGP1, Xs)
+  
+  # LOO error
+  SLOO_out <- LOO_preds(HetGP1) 
+  # ES-LOO
+  eL <- abs(SLOO_out$mean - Ys)
+  EEL <- SLOO_out$sd2 + predO$sd2/Rep_count + (eL)^2
+  VEL <- (2*((SLOO_out$sd2 + predO$sd2/Rep_count)^2)) + ((4*(SLOO_out$sd2 + predO$sd2/Rep_count)) * (eL^2))
+  EL <- EEL/(sqrt(VEL))
+  
+  Xs <- as.matrix(Xs)
+  yEL <- as.vector(EL)
+  n <- dim(Xs)[1]
+  p <- dim(Xs)[2]
+  
+  n_train <- dim(Xs)[1]
+  x_pred <- Xpred
+  n_preds <- dim(x_pred)[1]
+  
+  # Fit GP
+  y_predsEL <- c()
+  Lower <- sqrt(-0.5/log(1e-8))
+  kmodel <- km(design=data.frame(X1=Xs[,1],X2=Xs[,2]), response=yEL, lower = Lower, covtype="matern3_2")
+  kmout <- predict(kmodel, newdata=data.frame(X1=x_pred[,1],X2=x_pred[,2]), type='UK')
+  y_predsEL$postmean <- kmout$mean
+  y_predsEL$postvar <- kmout$sd
+  
+  # and use expected improvement
+  u1 <- (y_predsEL$postmean - max(EL)) / (y_predsEL$postvar)
+  EI <- (y_predsEL$postmean - max(EL)) * (pnorm(u1)) + (y_predsEL$postvar * dnorm(u1))
+  
+  # pseudo points can also be added
+  pp1 <- as.matrix(rbind(expand.grid(c(0,1), seq(0,1,1/(NoPP+1))), expand.grid(seq(0,1,1/(NoPP+1)), c(0,1))))
+  pp3 <- rbind(pp1, Xs, c(0,Xs[which.min(Xs[,1]),2]), c(Xs[which.max(Xs[,2]),1],1), c(1,Xs[which.max(Xs[,1]),2]), c(Xs[which.min(Xs[,2]),1],0) )
+  ppoints <- pp3[!duplicated(pp3), ]
+  
+  RF1a <- covMat1Mat2(object=kmodel@covariance, X1=data.matrix(x_pred), X2=data.matrix(ppoints))
+  RF1 <- RF1a/kmodel@covariance@sd2
+  RF2 <- 1-RF1
+  RF <- apply(RF2, 1, prod)
+  
+  # Pseudo expected improvement
+  PEI <- EI * RF
+  x_newN <- as.numeric(x_pred[which.max(PEI),])
+  MaxPEIN <- PEI[which.max(PEI)]
+  
+  xNEV <- predict(kmodel, newdata=data.frame(X1=x_newN[1],X2=x_newN[2]), type='UK')
+  
+  return(list(x_newN=x_newN, MaxPEIN=MaxPEIN, xNEV=xNEV))
+}
+
+SD_New_Point_OPT <- function(xx, Xx1, Yy1, HetGP1, NoPP=5) {
+  
+  Dim <- dim(Xx1)[2]
+  Xs <- unique(Xx1)
+  Rep_count <- apply(Xs, 1, function(xs1) sum(apply(Xx1, 1, function(X1) identical(xs1, X1))))
+  Ys <- apply(Xs, 1, function(xs1) mean(Y[apply(Xx1, 1, function(X1) identical(xs1, X1))]))
+  predO <- predict(HetGP1, Xs)
+  
+  # LOO error
+  SLOO_out <- LOO_preds(HetGP1) 
+  # ES-LOO
+  eL <- abs(SLOO_out$mean - Ys)
+  EEL <- SLOO_out$sd2 + predO$sd2/Rep_count + (eL)^2
+  VEL <- (2*((SLOO_out$sd2 + predO$sd2/Rep_count)^2)) + ((4*(SLOO_out$sd2 + predO$sd2/Rep_count)) * (eL^2))
+  EL <- EEL/(sqrt(VEL))
+  
+  Xs <- as.matrix(Xs)
+  yEL <- as.vector(EL)
+  n <- dim(Xs)[1]
+  p <- dim(Xs)[2]
+  
+  n_train <- dim(Xs)[1]
+  x_pred <- Xpred
+  n_preds <- dim(x_pred)[1]
+  
+  # Fit GP
+  y_predsEL <- c()
+  Lower <- sqrt(-0.5/log(1e-8))
+  kmodel <- km(design=data.frame(X1=Xs[,1],X2=Xs[,2]), response=yEL, lower = Lower, covtype="matern3_2")
+  kmout <- predict(kmodel, newdata=matrix(xx,1,Dim), type='UK')
+  y_predsEL$postmean <- kmout$mean
+  y_predsEL$postvar <- kmout$sd
+  
+  # and use expected improvement
+  u1 <- (y_predsEL$postmean - max(EL)) / (y_predsEL$postvar)
+  EI <- (y_predsEL$postmean - max(EL)) * (pnorm(u1)) + (y_predsEL$postvar * dnorm(u1))
+  
+  # pseudo points can also be added
+  pp1 <- as.matrix(rbind(expand.grid(c(0,1), seq(0,1,1/(NoPP+1))), expand.grid(seq(0,1,1/(NoPP+1)), c(0,1))))
+  pp3 <- rbind(pp1, Xs, c(0,Xs[which.min(Xs[,1]),2]), c(Xs[which.max(Xs[,2]),1],1), c(1,Xs[which.max(Xs[,1]),2]), c(Xs[which.min(Xs[,2]),1],0) )
+  ppoints <- pp3[!duplicated(pp3), ]
+  
+  RF1a <- covMat1Mat2(object=kmodel@covariance, X1=matrix(xx,1,Dim), X2=data.matrix(ppoints))
+  RF1 <- RF1a/kmodel@covariance@sd2
+  RF2 <- 1-RF1
+  RF <- apply(RF2, 1, prod)
+  
+  # Pseudo expected improvement
+  PEI <- EI * RF
+ return(-PEI)
+}
+
+
+SD_replicate_2d <- function(X, Y, HetGP1) {
+  
+  Xs <- unique(X)
+  Rep_count <- apply(Xs, 1, function(xs1) sum(apply(X, 1, function(X1) identical(xs1, X1))))
+  predO <- predict(HetGP1, Xs, noise.var=TRUE)
+    
+  Yp <- rep(0,dim(X)[1])
+  for (i in 1:dim(Xs)[1]) {
+    Yp[apply(X, 1, function(X1) identical(Xs[i,], X1))] <- predO$nugs[i]
+  }
+    
+  SLOOR_out <- Sto_loo_2d(x_val=X, y_val=Y)
+  Yr <- (SLOOR_out$nugstar - Yp)
+  hetYr <- mleHetGP(X=X, Z=Yr)
+  predOYr <- predict(hetYr, Xs, noise.var=TRUE)
+    
+  EV <- (predOYr$sd2 + predOYr$nugs) + (predOYr$mean)^2
+  MaxEVR <- max(EV)
+  x_newR <- Xs[which.max(EV),]
+
+  return(list(x_newR=x_newR, MaxEVR=MaxEVR))
+}
+
+
+Sto_loo_2d <- function( x_val, y_val ) {
+  
+  n <- dim(x_val)[1]
+  mstarn <- matrix(0,nrow=n,ncol=1)
+  vstarn <- matrix(0,nrow=n,ncol=1)
+  nugstarn <- matrix(0,nrow=n,ncol=1)
+  nugvn <- matrix(0,nrow=n,ncol=1)
+  
+  for (k in 1:n) {
+    Dnew <- x_val[-(k),] # remove each set of input values in turn
+    fDnew <- y_val[-k] # and each corresponding output
+    nnew <- n-1 # New number of data point
+    hetgpmod5 <- mleHetGP(X=Dnew, Z=fDnew)
+    
+    X_pred <- x_val[k,] 
+    ypred <- predict(hetgpmod5, X_pred, noise.var=TRUE)
+    mstarn[k] <- ypred$mean
+    vstarn[k] <- ypred$sd2 + ypred$nugs
+    nugstarn[k] <- ypred$nugs
+    if (is.null(ypred$sd2var)) {
+      nugvn[k] <- 0
+    } else {
+      nugvn[k] <- ypred$sd2var
+    }
+  }
+  
+  return(list(mstar=mstarn, vstar=vstarn, nugstar=nugstarn, nugv=nugvn))
+}
+```
+
+```{r SeqDes2}
+
+# Put data into format for HetGP
+Xhet <- as.matrix(do.call("rbind", rep(list(XWolf1), 10)))
+Yhet <- as.vector(as.matrix(YWolf1))
+
+# Fit initial HetGP
+hetgpmod <- mleHetGP(X=Xhet, Z=(Yhet))
+
+pred <- predict(hetgpmod, as.matrix(DataT[,(2:3)]/20), noise.var=TRUE)
+predmu <- pred$mean
+predvar <- pred$sd2 + pred$nugs
+
+# Initial RMSE
+# Mean
+RMSE1 <- ((DataT_Mean - predmu)^2)
+RMSE2 <- (sqrt(sum(RMSE1)/length(DataT_Mean)))
+print(RMSE2)
+# Variance
+RMSE3 <- ((DataT_Var - predvar)^2)
+RMSE4 <- (sqrt(sum(RMSE3)/length(DataT_Var)))
+print(RMSE4)
+
+
+Rep_count <- apply(XWolf1, 1, function(xs1) sum(apply(Xhet, 1, function(X1) identical(xs1, X1))))
+
+# Begin sequential design algorithm
+  
+# CHOOSE EITHER GRID SEARCH OR OPTIMISER
+# ---------------------------------------------------------------------------#
+# Sequential design using optimiser
+#NorR <- new_OR_rep_OPT(Xx=X, Yy=Y, HetGP=hetgpmod, c=1)
+# Sequential design on a predefined grid
+NorR <- new_OR_rep_GRID(Xx=Xhet, XPN=(DataT[,(2:3)]/20), Yy=Yhet, HetGP=hetgpmod, c=1)
+# ---------------------------------------------------------------------------#
+  
+NorR$NextP
+NorR$NextP*20
+
+pred <- predict(hetgpmod, as.matrix(Data_W1), noise.var=TRUE)
+predmu <- pred$mean
+predvar <- pred$sd2 + pred$nugs
+
+# Plot with new point
+ggplot() +
+  geom_raster(aes(x=Data_W1[,1], y=Data_W1[,2], fill=predmu)) +
+  scale_fill_gradientn(colours=c('white',"#009E73")) +
+  geom_tile(aes(x=Data_W0[,1], y=Data_W0[,2]), fill="#D55E00", alpha=0.6) +
+  geom_point(aes(x=Ddata[,1], y=Ddata[,2]), size=2) +
+  geom_point(aes(x=NorR$NextP[1], y=NorR$NextP[2]), col='firebrick3', size=5, shape=4, stroke=4) +
+  xlab(TeX('Sheep Reproduction')) + ylab(TeX('Wolf Reproduction')) + labs(fill=TeX('Time to Extinct'))
+
+# Re-fit HetGP
+Xhet <- rbind(Xhet, as.matrix(DataT[,(2:3)]/20)[which((DataT[,(2:3)]/20) == NorR$NextP),])
+Yhet <- c(Yhet, DataT[,4][which((DataT[,(2:3)]/20) == NorR$NextP)])
+hetgpmod <- mleHetGP(X=Xhet, Z=(Yhet))
+pred <- predict(hetgpmod, as.matrix(DataT[,(2:3)]/20), noise.var=TRUE)
+predmu <- pred$mean
+predvar <- pred$sd2 + pred$nugs
+
+# New RMSE
+# Mean
+RMSE1 <- ((DataT_Mean - predmu)^2)
+RMSE2 <- (sqrt(sum(RMSE1)/length(DataT_Mean)))
+print(RMSE2)
+# Variance
+RMSE3 <- ((DataT_Var - predvar)^2)
+RMSE4 <- (sqrt(sum(RMSE3)/length(DataT_Var)))
+print(RMSE4)
+```
+
+## History Matching
+
+History matching [@Craig1996; @Vernon2010] is a form of calibration that attempts to find input parameter values to achieve consistency between observations and the agent based model. Unlike traditional calibration that provides a full probabilistic description of the input parameters, the goal of history matching is to identify the regions of input space that correspond to acceptable matches. This is performed by ruling out the implausible regions iteratively in waves. 
+
+The GP is specified to represent the relationship between an observation $z$ and the model $f$ as:
+$$
+z = f(\textbf{x}) + d + e,
+$$
+where $d$ represents the discrepancy between the model and the true physical system and $e$ is the observation error. Non-consistent regions of space are ruled out using an implausibility metric. The implausibility function $I(\textbf{x})$ is defined as a measure of the distance between the output of the model at $\textbf{x}$ and an observation $z$:
+$$
+I(\textbf{x}) = \frac{|z - \mathbb{E}(f(\textbf{x}))|}{\sqrt{\text{Var}(e) + \text{Var}(d) + \text{Var}(f(\textbf{x}))}}
+$$
+Here,  $\mathbb{E}(f(\textbf{x}))=m^{*}(\textbf{x})$ and $\text{Var}(f(\textbf{x})) = k^{*}(\textbf{x}, \textbf{x})$ are the posterior mean and variance of the Gaussian process, $\text{Var}(e)$ is the variance of the observation error, and $\text{Var}(d)$ is the variance of the model discrepancy.
+
+For model output $f(\textbf{x})$ and observation $z$, large values of the implausibility imply that, relative to our uncertainty, the predicted output of the computer model at $\textbf{x}$ is far from the observation. A threshold is chosen so that any implausibility value greater than the threshold is deemed implausible, and the corresponding $\textbf{x}$ is discarded. The remaining parameter space is termed as Not Ruled Out Yet (NROY).
+
+History matching is typically performed in waves to iteratively shrink the input space. With each iteration, we set up an initial design, we run this design through the ABM, and build a GP with the training data. We then use this to rule out space, and then generate a new design from the input space that has not yet been ruled out.  History matching is applied to the sheep and wolf ABM, and the reduced space is given in the figure below with respect to an observation shown in red. 
+
+```{r HM1}
+# Observation - chosen at [2.5,2.5]
+Obs <- c(450, 368, 352, 364, 370, 412, 342, 498, 458, 368)
+
+
+# Load in data again
+Data <- read.csv('DataSW.csv')
+X <- Data[,2:3]/20
+YData <- Data[,4:dim(Data)[2]]
+YWolf <- YData[,(seq(2,dim(YData)[2],2))]
+YSheep <- YData[,(seq(1,dim(YData)[2],2))]
+
+WData <- cbind(X, YWolf)
+
+XWolf1 <- WData[is.na(WData[,3])==FALSE,(1:2)]
+YWolf1 <- WData[is.na(WData[,3])==FALSE,(3:dim(WData)[2])]
+
+XWolf0 <- WData[is.na(WData[,3])==TRUE,(1:2)]
+colours <- c('Yes'="#009E73", 'No'="#D55E00")
+ggplot() +
+  geom_point(aes(x=XWolf1[,1], y=XWolf1[,2], col='Yes'), size=3) +
+  geom_point(aes(x=XWolf0[,1], y=XWolf0[,2], col='No'), size=3) +
+  scale_color_manual(values=colours) +
+  xlab(TeX('Sheep Reproduction')) + ylab(TeX('Wolf Reproduction')) + labs(colour=TeX('Wolves Extinct'))
+
+
+# Take the sample mean of the data to use as an approximation to the mean response
+YW_Mean <- apply(YWolf1, 1, mean)
+# Fit a GP to the sample means (log taken for computational stability)
+
+# Kriging
+ModelL1 <- km(design = data.frame(XWolf1), response = log(YW_Mean), covtype = "matern3_2",
+              control = list(trace = FALSE, BFGSburnin=2, max.generations = 20))
+predL1 <-  predict(ModelL1, newdata=(Data_W1), type="UK", checkNames=F, 
+                   light.return = F)
+
+# RobustGasp
+#ModelL1 <- rgasp(design = data.frame(XWolf1), response = log(YW_Mean), kernel_type = "matern3_2")
+#predL1 <-  predict(ModelL1, testing_input=(Data_W1))
+
+# Plot
+ggplot() +
+  geom_raster(aes(x=Data_W1[,1], y=Data_W1[,2], fill=exp(predL1$mean))) +
+  scale_fill_gradientn(colours=c('white',"#009E73")) +
+  geom_tile(aes(x=Data_W0[,1], y=Data_W0[,2]), fill="#D55E00", alpha=0.6) +
+  geom_point(aes(x=XWolf1[,1], y=XWolf1[,2]), size=2) +
+  geom_point(aes(x=0.125, y=0.125), size=5, col='firebrick3', shape=4, stroke=4) +
+  xlab(TeX('Sheep Reproduction')) + ylab(TeX('Wolf Reproduction')) + labs(fill=TeX('Time to Extinct'))
+
+
+# Mean of the observation
+MObs <- mean(Obs)
+MObs
+
+# Implausibility function
+ImpMeasure <- function(MPred, VPred, tDisc, tObsErr, tObs) {
+  IMPM <- abs(tObs - MPred) / sqrt(tDisc + tObsErr + VPred)
+  return(IMPM)
+}
+
+# Apply implausibility metric
+# True discrepancy is unknown, estimated to be 0.02
+# Zero observation error
+IMPs <- ImpMeasure(MPred=predL1$mean, VPred=((predL1$sd)^2), tDisc=0.02, tObsErr=0, tObs=log(MObs))
+
+# Plot NROY space
+ROPsW1 <- Data_W1[(IMPs > 3),]
+NROPsW1 <- Data_W1[(IMPs < 3),]
+
+ggplot() +
+  geom_tile(aes(x=ROPsW1[,1], y=ROPsW1[,2]), fill='grey50', alpha=0.6) +
+  geom_tile(aes(x=NROPsW1[,1], y=NROPsW1[,2]), fill="#009E73", alpha=0.6) +
+  geom_tile(aes(x=Data_W0[,1], y=Data_W0[,2]), fill="#D55E00", alpha=0.6) +
+  geom_point(aes(x=XWolf1[,1], y=XWolf1[,2]), size=2) +
+  geom_point(aes(x=XWolf0[,1], y=XWolf0[,2]), size=2) +
+  geom_point(aes(x=0.125, y=0.125), size=5, col='firebrick3', shape=4, stroke=4) +
+  xlab(TeX('Sheep Reproduction')) + ylab(TeX('Wolf Reproduction')) + labs(fill=TeX('Time to Extinct'))
+```
+
+## References
+
