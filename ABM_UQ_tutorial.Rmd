@@ -7,10 +7,6 @@ header-includes:
   - \usepackage{bbm}
 ---
 
-Check all
-tt
-refs - all issues
-
 This is an interactive tutorial on how to perform various uncertainty quantification methods for a simple sheep and wolf predator-prey agent based model. All code and data are either included in this document or in the additional files (<tt> DataSW.csv </tt>, <tt> DataSW_Test.csv </tt>). All necessary R packages are listed below. For any questions or queries, please contact <tt> l.m.kimpton\@exeter.ac.uk </tt>.
 
 ```{r packages, echo=TRUE, message=FALSE, error=FALSE}
